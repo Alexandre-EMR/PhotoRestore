@@ -13,6 +13,7 @@ are stubs that explain the roadmap step instead of doing anything unsafe.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -23,7 +24,12 @@ from .exif_write import ExifWriteNotImplemented
 from .ingest import discover, extract_archives
 from .manifest import Manifest, sha256_file
 from .match import match_all
-from .report import write_audit_export, write_match_report, write_summary
+from .report import (
+    write_audit_export,
+    write_match_report,
+    write_quarantine_report,
+    write_summary,
+)
 
 STUB_EXIT_CODE = 2  # explicit, documented: subcommand planned but not implemented
 
@@ -72,18 +78,27 @@ def cmd_match(args: argparse.Namespace, cfg: AppConfig) -> int:
 
     # Reports are rebuilt FROM THE MANIFEST (global state), not from the
     # current run: re-running is a strict no-op on the report files.
+    quarantined = sorted(manifest.quarantined_media())
+    q_paths = {q[0] for q in quarantined}
     rows = [
         (media, rule, sidecar, "MATCH", note)
         for media, rule, sidecar, note in sorted(manifest.matched_decisions())
     ]
-    for m in sorted(
-        manifest.pending_media(states=("discovered", "hashed")), key=lambda r: r.path
-    ):
-        rows.append(
-            (m.path, "", "", "UNMATCHED", "no sure rule matched (R2-R5 planned)")
+    rows += [(path, rule, "", "QUARANTINE", note) for path, rule, note in quarantined]
+    rows += [
+        (m.path, "", "", "UNMATCHED", "no sure rule matched (R2-R5 planned)")
+        for m in sorted(
+            (r for r in manifest.pending_media(states=("discovered", "hashed"))
+             if r.path not in q_paths),
+            key=lambda r: r.path,
         )
+    ]
+    rows.sort(key=lambda r: r[0])
     report_dir = Path(args.report_dir)
     write_match_report(rows, report_dir, cfg.paths)
+    write_quarantine_report(
+        [(path, "", note) for path, _rule, note in quarantined], report_dir, cfg.paths
+    )
     counts: dict[tuple[str, str], int] = {}
     for _media, rule, _sc, decision, _note in rows:
         counts[(rule, decision)] = counts.get((rule, decision), 0) + 1
@@ -198,7 +213,11 @@ def main(argv: list[str] | None = None) -> int:
         print("abandon : --apply refusé, reste en dry-run.")
         return 1
     cfg = load_config(args.config)
-    return int(args.func(args, cfg) or 0)
+    try:
+        return int(args.func(args, cfg) or 0)
+    except (OSError, sqlite3.Error) as e:
+        print(f"erreur: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -55,6 +55,26 @@ class PipelineTest(unittest.TestCase):
         body = rows[1:]
         self.assertGreaterEqual(len(body), 9)  # every media gets a decision row
 
+    def test_ambiguous_media_quarantined_and_reported(self) -> None:
+        rc = self.run_cli(
+            "--db", str(self.db), "--report-dir", str(self.reports),
+            "run", str(self.source),
+        )
+        self.assertEqual(rc, 0)
+        # the ambiguous fixture (both sidecar formats) must be QUARANTINE
+        match_rows = list(csv.DictReader((self.reports / "match_report.csv").open(encoding="utf-8")))
+        q = [r for r in match_rows if r["decision"] == "QUARANTINE"]
+        self.assertEqual(len(q), 1)
+        self.assertTrue(q[0]["media_path"].endswith("IMG_0009.jpg"))
+        self.assertIn("ambiguous", q[0]["note"])
+        # quarantine_report.csv exists, well-formed, with the reason
+        q_report = self.reports / "quarantine_report.csv"
+        self.assertTrue(q_report.exists())
+        q_rows = list(csv.reader(q_report.open(encoding="utf-8")))
+        self.assertEqual(q_rows[0], ["media_path", "sidecar_path", "reason"])
+        self.assertEqual(len(q_rows), 2)  # header + the one quarantined item
+        self.assertIn("ambiguous", q_rows[1][2])
+
     def test_r1_matches_and_orphan_stays_unmatched(self) -> None:
         cfg = load_config(None)
         manifest = Manifest(self.db)
@@ -72,9 +92,12 @@ class PipelineTest(unittest.TestCase):
         decisions = match_all(manifest, cfg.match)
         matched = [d for d in decisions if d.decision == "MATCH"]
         unmatched = [d for d in decisions if d.decision == "UNMATCHED"]
+        quarantined = [d for d in decisions if d.decision == "QUARANTINE"]
         # R1 matches: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited,
         # the video, and the sous-dossier exact pair = 6
         self.assertEqual(len(matched), 6)
+        # the ambiguous fixture (both sidecar formats) is quarantined
+        self.assertEqual(len(quarantined), 1)
         orphans = [d for d in unmatched if d.media.endswith("orphan.jpg")]
         self.assertEqual(len(orphans), 1, "orphan must stay unmatched")
         manifest.close()

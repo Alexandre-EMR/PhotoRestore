@@ -46,10 +46,20 @@ def _sidecar_candidates(media_path: Path) -> list[str]:
 
 
 def match_r1_exact(media_path: Path, sidecar_index: dict[str, str]) -> MatchDecision | None:
-    """R1: exact sidecar filename in the same folder. None = rule does not apply."""
-    for cand in _sidecar_candidates(media_path):
-        if cand in sidecar_index:
-            return MatchDecision(str(media_path), "R1_exact", sidecar_index[cand], "MATCH")
+    """R1: exact sidecar filename in the same folder. None = rule does not apply.
+
+    POLICY: if BOTH the new (.supplemental-metadata.json) and the old (.json)
+    sidecars exist for the same media, the rule is AMBIGUOUS => QUARANTINE,
+    never a silent pick of one of them.
+    """
+    found = [cand for cand in _sidecar_candidates(media_path) if cand in sidecar_index]
+    if len(found) > 1:
+        return MatchDecision(
+            str(media_path), "R1_exact", None, "QUARANTINE",
+            note="ambiguous: both .supplemental-metadata.json and .json sidecars exist",
+        )
+    if found:
+        return MatchDecision(str(media_path), "R1_exact", sidecar_index[found[0]], "MATCH")
     return None
 
 
@@ -59,16 +69,23 @@ def match_r2_truncated(
     """R2: sidecar truncated at `trunc` chars; match only if the candidate is unique.
 
     Ambiguity (two media starting with the same 46 chars) => QUARANTINE.
+    Planned for P2: stubs must announce their absence, never fake a result.
     """
-    stem = media_path.name[:trunc]
-    hits = [p for p in sidecar_index if Path(p).name.startswith(stem) and p != str(media_path)]
     raise RuleNotImplemented("R2 planned for P2 — see AGENTS.md prompt M3")
 
 
-def build_sidecar_index(manifest: Manifest) -> dict[str, str]:
-    """Map sidecar filename -> full path, for the folder-local lookups."""
+def build_sidecar_index(manifest: Manifest) -> dict[Path, dict[str, str]]:
+    """Folder-keyed sidecar index: {folder: {sidecar_name: full_path}}.
+
+    Keying by folder is mandatory: two albums may contain sidecars with the
+    same filename, and a flat name-keyed map would silently drop one.
+    """
     rows = manifest.db.execute("SELECT path FROM sidecars").fetchall()
-    return {Path(r[0]).name: r[0] for r in rows}
+    index: dict[Path, dict[str, str]] = {}
+    for (p,) in rows:
+        full = Path(p)
+        index.setdefault(full.parent, {})[full.name] = p
+    return index
 
 
 def match_all(manifest: Manifest, cfg: MatchConfig) -> list[MatchDecision]:
@@ -82,20 +99,23 @@ def match_all(manifest: Manifest, cfg: MatchConfig) -> list[MatchDecision]:
     rows = manifest.pending_media(states=("hashed",))
     for m in rows:
         media_path = Path(m.path)
-        folder = media_path.parent
-        local_index = {n: p for n, p in index.items() if Path(p).parent == folder}
+        local_index = index.get(media_path.parent, {})
 
-        matched = match_r1_exact(media_path, local_index)
-        if matched is not None:
-            decisions.append(matched)
-            manifest.set_matched(m.path, matched.sidecar, "R1_exact")
-            continue
-        # R2-R5 are planned (P2+): leave item in 'hashed' state, report it.
-        decisions.append(
-            MatchDecision(
-                str(media_path), "", None, "UNMATCHED",
-                note="R1 no exact sidecar; R2-R5 not implemented in v0",
+        decision = match_r1_exact(media_path, local_index)
+        if decision is None:
+            # R2-R5 are planned (P2+): leave item in 'hashed' state, report it.
+            decisions.append(
+                MatchDecision(
+                    str(media_path), "", None, "UNMATCHED",
+                    note="R1 no exact sidecar; R2-R5 not implemented in v0",
+                )
             )
-        )
+            continue
+        decisions.append(decision)
+        if decision.decision == "MATCH":
+            manifest.set_matched(m.path, decision.sidecar, "R1_exact")
+        else:
+            # QUARANTINE: media stays in 'hashed' state, reason recorded.
+            manifest.set_quarantined(m.path, "R1_exact", decision.note)
     manifest.commit()
     return decisions
