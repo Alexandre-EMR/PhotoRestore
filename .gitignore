@@ -1,0 +1,14 @@
+# Fichiers générés par le pipeline et les tests
+*.db
+*.db-wal
+*.db-shm
+reports/
+.replay_reports/
+.fixtures/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/

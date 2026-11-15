@@ -1,0 +1,33 @@
+# PhotoRestore — configuration par défaut
+# Chaque valeur est surchargeable ; les clés absentes conservent les défauts du code.
+
+[match]
+trunc_length = 46
+heuristic_size_tolerance = 0.02
+heuristic_time_window_hours = 48
+perceptual_hamming_max = 3
+
+[dedup]
+phash_prefilter_size = 8
+phash_confirm_size = 16
+hamming_same_image_max = 5
+hamming_variant_min = 6
+hamming_variant_max = 10
+video_frame_interval_s = 10
+video_max_frames = 30
+video_dup_min_frames = 3
+video_frame_hamming_max = 8
+
+[write]
+policy = "fill_missing"   # "fill_missing" (défaut, non destructif) | "json_wins"
+min_year = 1900
+max_year = 2026
+
+[paths]
+duplicates_dir = "_duplicates"
+quarantine_dir = "_quarantine"
+match_report = "match_report.csv"
+quarantine_report = "quarantine_report.csv"
+summary_html = "summary.html"
+audit_export = "audit_export.jsonl"
+undo_manifest = "undo_manifest.csv"

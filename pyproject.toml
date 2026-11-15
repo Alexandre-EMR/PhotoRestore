@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photorestore"
+version = "0.1.0"
+description = "Restore Google Takeout JSON metadata to your photos and videos, deduplicate by pixel content, and prepare Synology Photos re-indexing. Local-first, dry-run by default."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Alexandre" }]
+keywords = ["google-takeout", "google-photos", "exif", "metadata", "deduplication", "synology", "nas"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics",
+]
+
+# No runtime dependency by design (stdlib only in v0).
+# Optional future deps (typer CLI, Pillow hashing) are documented in AGENTS.md.
+dependencies = []
+
+[project.scripts]
+photorestore = "photorestore.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/Alexandre-EMR/photorestore#readme"
+Issues = "https://github.com/Alexandre-EMR/photorestore/issues"
+
+[tool.setuptools.packages.find]
+include = ["photorestore*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
