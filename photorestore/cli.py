@@ -23,7 +23,12 @@ from .exif_write import ExifWriteNotImplemented
 from .ingest import discover, extract_archives
 from .manifest import Manifest, sha256_file
 from .match import match_all
-from .report import write_audit_export, write_match_report, write_summary
+from .report import (
+    write_audit_export,
+    write_match_report,
+    write_quarantine_report,
+    write_summary,
+)
 
 STUB_EXIT_CODE = 2  # explicit, documented: subcommand planned but not implemented
 
@@ -76,14 +81,15 @@ def cmd_match(args: argparse.Namespace, cfg: AppConfig) -> int:
         (media, rule, sidecar, "MATCH", note)
         for media, rule, sidecar, note in sorted(manifest.matched_decisions())
     ]
-    for m in sorted(
-        manifest.pending_media(states=("discovered", "hashed")), key=lambda r: r.path
-    ):
-        rows.append(
-            (m.path, "", "", "UNMATCHED", "no sure rule matched (R2-R5 planned)")
-        )
+    rows.extend(sorted(manifest.pending_decisions()))
     report_dir = Path(args.report_dir)
     write_match_report(rows, report_dir, cfg.paths)
+    write_quarantine_report(
+        [(media, sidecar, note) for media, _r, sidecar, decision, note in rows
+         if decision == "QUARANTINE"],
+        report_dir,
+        cfg.paths,
+    )
     counts: dict[tuple[str, str], int] = {}
     for _media, rule, _sc, decision, _note in rows:
         counts[(rule, decision)] = counts.get((rule, decision), 0) + 1

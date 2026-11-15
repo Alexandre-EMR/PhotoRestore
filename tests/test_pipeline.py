@@ -53,9 +53,18 @@ class PipelineTest(unittest.TestCase):
         rows = list(csv.reader(match_report.open(encoding="utf-8")))
         self.assertEqual(rows[0], ["media_path", "rule", "sidecar_path", "decision", "note"])
         body = rows[1:]
-        self.assertGreaterEqual(len(body), 9)  # every media gets a decision row
+        self.assertEqual(len(body), 12)  # every media gets a decision row
+        decisions = {r[3] for r in body}
+        self.assertIn("MATCH", decisions)
+        self.assertIn("QUARANTINE", decisions)
+        self.assertIn("UNMATCHED", decisions)
+        # quarantine report exists and is motivated
+        qrows = list(csv.reader((self.reports / "quarantine_report.csv").open(encoding="utf-8")))
+        self.assertEqual(qrows[0], ["media_path", "sidecar_path", "reason"])
+        self.assertEqual(len(qrows) - 1, 1)
+        self.assertTrue(qrows[1][2])  # reason is non-empty
 
-    def test_r1_matches_and_orphan_stays_unmatched(self) -> None:
+    def test_cascade_matches_and_orphan_stays_unmatched(self) -> None:
         cfg = load_config(None)
         manifest = Manifest(self.db)
         # simulate ingest+hash (media AND sidecars must be registered)
@@ -70,12 +79,20 @@ class PipelineTest(unittest.TestCase):
             manifest.set_hashed(m.path, sha256_file(Path(m.path)))
         manifest.commit()
         decisions = match_all(manifest, cfg.match)
-        matched = [d for d in decisions if d.decision == "MATCH"]
-        unmatched = [d for d in decisions if d.decision == "UNMATCHED"]
-        # R1 matches: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited,
-        # the video, and the sous-dossier exact pair = 6
-        self.assertEqual(len(matched), 6)
-        orphans = [d for d in unmatched if d.media.endswith("orphan.jpg")]
+        by_rule: dict[str, list[str]] = {}
+        for d in decisions:
+            by_rule.setdefault(d.rule or d.decision, []).append(d.media)
+        # R1: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited, video,
+        # sous-dossier pair, IMG_0006 = 7
+        self.assertEqual(len(by_rule.get("R1_exact", [])), 7)
+        self.assertEqual(len(by_rule.get("R2_truncated", [])), 1)  # long name
+        self.assertEqual(len(by_rule.get("R3_title", [])), 1)       # IMG_0003
+        # R5: perceptual pair -> QUARANTINE proposal, never a write
+        self.assertEqual(len(by_rule.get("R5_perceptual", [])), 1)
+        quarantined = by_rule["R5_perceptual"]
+        self.assertTrue(quarantined[0].endswith("IMG_0006-copy.jpg"))
+        unmatched = by_rule.get("UNMATCHED", [])
+        orphans = [p for p in unmatched if p.endswith("orphan.jpg")]
         self.assertEqual(len(orphans), 1, "orphan must stay unmatched")
         manifest.close()
 

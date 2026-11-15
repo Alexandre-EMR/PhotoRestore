@@ -60,7 +60,8 @@ python3 -m photorestore.cli --apply fix
 | Phase | Statut | Contenu |
 |---|---|---|
 | P1 squelette | ✅ | ingest, manifeste SQLite resumable, R1 exact, rapports, CLI, corpus de test |
-| P2 cœur | ⬜ | règles R2–R5, écriture EXIF/XMP (exiftool) |
+| P2 cœur (match) | ✅ | cascade R1–R5 complète : tronqué-46, title, heuristique, perceptuel→quarantaine |
+| P2 cœur (fix) | ⬜ | écriture EXIF/XMP via exiftool |
 | P3 dedup | ⬜ | L0 sha256 · L1 pHash · L2 même-nom · L3 vidéos · undo |
 | P4 consolidation | ⬜ | anomalies, Docker Synology (Container Manager) |
 
