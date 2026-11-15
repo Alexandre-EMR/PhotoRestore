@@ -22,8 +22,12 @@ classifiers = [
 ]
 
 # No runtime dependency by design (stdlib only in v0).
-# Optional future deps (typer CLI, Pillow hashing) are documented in AGENTS.md.
+# Documented exception: the optional "perceptual" extra (Pillow + ImageHash)
+# enables the R5 matching rule; without it R5 is cleanly skipped.
 dependencies = []
+
+[project.optional-dependencies]
+perceptual = ["Pillow>=10", "ImageHash>=4"]
 
 [project.scripts]
 photorestore = "photorestore.cli:main"
