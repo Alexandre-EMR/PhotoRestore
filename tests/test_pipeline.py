@@ -53,7 +53,7 @@ class PipelineTest(unittest.TestCase):
         rows = list(csv.reader(match_report.open(encoding="utf-8")))
         self.assertEqual(rows[0], ["media_path", "rule", "sidecar_path", "decision", "note"])
         body = rows[1:]
-        self.assertEqual(len(body), 12)  # every media gets a decision row
+        self.assertEqual(len(body), 14)  # every media gets a decision row
         decisions = {r[3] for r in body}
         self.assertIn("MATCH", decisions)
         self.assertIn("QUARANTINE", decisions)
@@ -83,8 +83,8 @@ class PipelineTest(unittest.TestCase):
         for d in decisions:
             by_rule.setdefault(d.rule or d.decision, []).append(d.media)
         # R1: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited, video,
-        # sous-dossier pair, IMG_0006 = 7
-        self.assertEqual(len(by_rule.get("R1_exact", [])), 7)
+        # sous-dossier pair, IMG_0006, photo-fake.jpg, anim.gif = 9
+        self.assertEqual(len(by_rule.get("R1_exact", [])), 9)
         self.assertEqual(len(by_rule.get("R2_truncated", [])), 1)  # long name
         self.assertEqual(len(by_rule.get("R3_title", [])), 1)       # IMG_0003
         # R5: perceptual pair -> QUARANTINE proposal, never a write
@@ -112,13 +112,16 @@ class PipelineTest(unittest.TestCase):
         report2 = (self.reports / "match_report.csv").read_text(encoding="utf-8")
         self.assertEqual(report, report2, "re-running must not change decisions")
 
-    def test_fix_and_dedup_are_safe_stubs(self) -> None:
+    def test_fix_dry_run_ok_and_dedup_still_stub(self) -> None:
+        # M4 is implemented: `fix` in dry-run exits 0 and writes fix_report.csv
         rc = self.run_cli("--db", str(self.db), "--report-dir", str(self.reports), "fix")
-        self.assertEqual(rc, 2)  # documented STUB_EXIT_CODE
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.reports / "fix_report.csv").exists())
+        # M5 dedup is still a documented stub (exit code 2)
         rc = self.run_cli(
             "--db", str(self.db), "--report-dir", str(self.reports), "dedup", str(self.source)
         )
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, 2)  # documented STUB_EXIT_CODE
 
 
 if __name__ == "__main__":

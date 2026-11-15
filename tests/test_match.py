@@ -247,7 +247,7 @@ class CascadeTest(unittest.TestCase):
         by_rule: dict[str, list[str]] = {}
         for d in decisions:
             by_rule.setdefault(d.rule or d.decision, []).append(Path(d.media).name)
-        self.assertEqual(len(by_rule.get("R1_exact", [])), 7)   # 6 old + IMG_0006
+        self.assertEqual(len(by_rule.get("R1_exact", [])), 9)   # incl. IMG_0006, photo-fake, gif
         self.assertEqual(by_rule.get("R2_truncated"), [LONG_NAME])
         self.assertEqual(by_rule.get("R3_title"), ["IMG_0003.jpg"])
         self.assertEqual(by_rule.get("R5_perceptual"), ["IMG_0006-copy.jpg"])

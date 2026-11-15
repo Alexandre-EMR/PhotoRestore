@@ -41,9 +41,11 @@ class WriteConfig:
     """EXIF write policies (module M4)."""
     # "fill_missing": only fill absent EXIF fields (default, non-destructive).
     # "json_wins": sidecar JSON overrides existing EXIF values.
+    # "ask": prompt interactively on conflicts (default: keep existing).
     policy: str = "fill_missing"
     min_year: int = 1900
     max_year: int = 2026
+    exiftool: str = "exiftool"  # binary name or absolute path (external dep)
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class PathsConfig:
     summary_html: str = "summary.html"
     audit_export: str = "audit_export.jsonl"
     undo_manifest: str = "undo_manifest.csv"
+    fix_report: str = "fix_report.csv"
 
 
 @dataclass(frozen=True)

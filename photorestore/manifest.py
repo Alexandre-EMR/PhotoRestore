@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS media (
     match_rule TEXT,
     match_note TEXT,
     decision TEXT NOT NULL DEFAULT ''
-        CHECK (decision IN ('', 'MATCH', 'QUARANTINE', 'UNMATCHED'))
+        CHECK (decision IN ('', 'MATCH', 'QUARANTINE', 'UNMATCHED')),
+    fix_note TEXT
 );
 CREATE TABLE IF NOT EXISTS sidecars (
     id INTEGER PRIMARY KEY,
@@ -66,6 +67,8 @@ class Manifest:
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(media)")}
         if "decision" not in cols:  # migration for DBs created before P2
             self.db.execute("ALTER TABLE media ADD COLUMN decision TEXT NOT NULL DEFAULT ''")
+        if "fix_note" not in cols:  # migration for DBs created before M4
+            self.db.execute("ALTER TABLE media ADD COLUMN fix_note TEXT")
         self.db.commit()
 
     # -- registration ----------------------------------------------------
@@ -181,6 +184,43 @@ class Manifest:
         return self.db.execute(
             """SELECT path, album, phash FROM media
                WHERE state IN ('matched','applied','verified') AND phash IS NOT NULL"""
+        ).fetchall()
+
+    def set_applied(self, path: str) -> None:
+        self.db.execute("UPDATE media SET state='applied' WHERE path=?", (path,))
+
+    def set_verified(self, path: str, note: str = "") -> None:
+        self.db.execute(
+            "UPDATE media SET state='verified', fix_note=? WHERE path=?", (note, path)
+        )
+
+    def set_fix_note(self, path: str, note: str) -> None:
+        """Record a fix outcome (dry-run plan / failure) without changing state."""
+        self.db.execute("UPDATE media SET fix_note=? WHERE path=?", (note, path))
+
+    def rename_media(self, old: str, new: str) -> None:
+        """After a journaled extension correction (lying extension)."""
+        self.db.execute("UPDATE media SET path=? WHERE path=?", (new, old))
+
+    def matched_with_sidecar(
+        self, states: tuple[str, ...] = ("matched", "applied")
+    ) -> list[tuple[str, str | None, int | None, float | None, float | None, str | None]]:
+        """(media_path, title, taken_timestamp, lat, lon, description) per matched media."""
+        q = ",".join("?" * len(states))
+        return self.db.execute(
+            f"""SELECT m.path, s.title, s.taken_timestamp, s.latitude, s.longitude, s.description
+                FROM media m JOIN sidecars s ON m.matched_sidecar = s.id
+                WHERE m.state IN ({q}) ORDER BY m.path""",
+            states,
+        ).fetchall()
+
+    def fix_decisions(self) -> list[tuple[str, str, str, str, str]]:
+        """(media, sidecar, rule, state, fix_note) for every media carrying a sidecar."""
+        return self.db.execute(
+            """SELECT m.path, COALESCE(s.path, ''), COALESCE(m.match_rule, ''),
+                      m.state, COALESCE(m.fix_note, '')
+               FROM media m LEFT JOIN sidecars s ON m.matched_sidecar = s.id
+               WHERE m.matched_sidecar IS NOT NULL ORDER BY m.path"""
         ).fetchall()
 
     def pending_decisions(self) -> list[tuple[str, str, str, str, str]]:

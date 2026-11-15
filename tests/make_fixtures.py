@@ -12,6 +12,8 @@ edge case of the cahier des charges:
   7. media WITHOUT any sidecar (must stay unmatched)
   8. same name, different content (future L2 dedup case)
   9. perceptual pair: identical pixels, only one sidecar (R5 -> quarantine)
+  10. lying extension: PNG bytes named .jpg (M4 rename, journaled)
+  11. GIF (no EXIF support): M4 XMP sidecar fallback
 
 Usage: python tests/make_fixtures.py <target_dir>
 """
@@ -142,6 +144,19 @@ def generate(target: Path) -> dict[str, int]:
     write_png(sub / "same-name.jpg", rgb=(200, 200, 200))
     (sub / "same-name.jpg.supplemental-metadata.json").write_text(
         json.dumps(sidecar("same-name.jpg")), encoding="utf-8"
+    )
+
+    # 10. lying extension: PNG bytes named .jpg (M4 renames it, journaled)
+    write_png(album / "photo-fake.jpg", rgb=(200, 60, 120))
+    (album / "photo-fake.jpg.supplemental-metadata.json").write_text(
+        json.dumps(sidecar("photo-fake.jpg", timestamp=1_600_030_000)), encoding="utf-8"
+    )
+
+    # 11. format without EXIF support (GIF): M4 falls back to an .xmp sidecar
+    (album / "anim.gif").write_bytes(b"GIF89a" + b"\x00" * 32)
+    (album / "anim.gif.supplemental-metadata.json").write_text(
+        json.dumps(sidecar("anim.gif", timestamp=1_600_040_000, description="anim")),
+        encoding="utf-8",
     )
 
     # album metadata
