@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS media (
         CHECK (state IN ('discovered','hashed','matched','applied','verified')),
     matched_sidecar INTEGER REFERENCES sidecars(id),
     match_rule TEXT,
-    match_note TEXT
+    match_note TEXT,
+    decision TEXT NOT NULL DEFAULT ''
+        CHECK (decision IN ('', 'MATCH', 'QUARANTINE', 'UNMATCHED')),
+    fix_note TEXT
 );
 CREATE TABLE IF NOT EXISTS sidecars (
     id INTEGER PRIMARY KEY,
@@ -61,6 +64,11 @@ class Manifest:
         self.db = sqlite3.connect(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(media)")}
+        if "decision" not in cols:  # migration for DBs created before P2
+            self.db.execute("ALTER TABLE media ADD COLUMN decision TEXT NOT NULL DEFAULT ''")
+        if "fix_note" not in cols:  # migration for DBs created before M4
+            self.db.execute("ALTER TABLE media ADD COLUMN fix_note TEXT")
         self.db.commit()
 
     # -- registration ----------------------------------------------------
@@ -109,9 +117,120 @@ class Manifest:
             sidecar_id = row[0] if row else None
         self.db.execute(
             """UPDATE media SET state='matched', matched_sidecar=?, match_rule=?,
-               match_note=? WHERE path=?""",
+               match_note=?, decision='MATCH' WHERE path=?""",
             (sidecar_id, rule, note, path),
         )
+
+    def set_decision(self, path: str, decision: str, rule: str, note: str = "") -> None:
+        """Record a non-matching cascade outcome (QUARANTINE/UNMATCHED).
+
+        The state stays 'hashed' so a later run re-evaluates deterministically;
+        the decision column keeps the report stable between runs (idempotence).
+        """
+        self.db.execute(
+            "UPDATE media SET decision=?, match_rule=?, match_note=? WHERE path=?",
+            (decision, rule, note, path),
+        )
+
+    # -- perceptual hash cache ---------------------------------------------
+
+    def get_phash(self, path: str) -> str | None:
+        row = self.db.execute("SELECT phash FROM media WHERE path=?", (path,)).fetchone()
+        return row[0] if row else None
+
+    def set_phash(self, path: str, phash: str) -> None:
+        self.db.execute("UPDATE media SET phash=? WHERE path=?", (phash, path))
+
+    # -- cascade support queries -------------------------------------------
+
+    def sidecar_rows(self) -> list[tuple[str, str, str | None, int | None]]:
+        """(path, album, title, taken_timestamp) for every registered sidecar."""
+        return self.db.execute(
+            "SELECT path, album, title, taken_timestamp FROM sidecars"
+        ).fetchall()
+
+    def claimed_sidecars(self) -> set[str]:
+        """Sidecar paths already matched to a media (in this or a previous run)."""
+        rows = self.db.execute(
+            """SELECT s.path FROM media m JOIN sidecars s ON m.matched_sidecar = s.id
+               WHERE m.state IN ('matched','applied','verified')"""
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def media_size_by_name(self, name: str) -> int | None:
+        """Size of any registered media with this filename (R4 size criterion)."""
+        row = self.db.execute(
+            "SELECT size FROM media WHERE path LIKE ? ORDER BY path LIMIT 1",
+            ("%/" + name,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def media_paths_in_folder(self, folder: Path) -> list[str]:
+        """All known media paths directly inside `folder` (for R2 uniqueness)."""
+        prefix = str(folder) + "/"
+        rows = self.db.execute(
+            "SELECT path FROM media WHERE path LIKE ?", (prefix + "%",)
+        ).fetchall()
+        return [r[0] for r in rows if Path(r[0]).parent == folder]
+
+    def matched_media(self) -> list[tuple[str, str]]:
+        """(path, album) of every media already carrying a sidecar (R5 pool)."""
+        return self.db.execute(
+            "SELECT path, album FROM media WHERE state IN ('matched','applied','verified')"
+        ).fetchall()
+
+    def matched_media_with_phash(self) -> list[tuple[str, str, str]]:
+        """(path, album, phash) of media that already carry a sidecar (R5 pool)."""
+        return self.db.execute(
+            """SELECT path, album, phash FROM media
+               WHERE state IN ('matched','applied','verified') AND phash IS NOT NULL"""
+        ).fetchall()
+
+    def set_applied(self, path: str) -> None:
+        self.db.execute("UPDATE media SET state='applied' WHERE path=?", (path,))
+
+    def set_verified(self, path: str, note: str = "") -> None:
+        self.db.execute(
+            "UPDATE media SET state='verified', fix_note=? WHERE path=?", (note, path)
+        )
+
+    def set_fix_note(self, path: str, note: str) -> None:
+        """Record a fix outcome (dry-run plan / failure) without changing state."""
+        self.db.execute("UPDATE media SET fix_note=? WHERE path=?", (note, path))
+
+    def rename_media(self, old: str, new: str) -> None:
+        """After a journaled extension correction (lying extension)."""
+        self.db.execute("UPDATE media SET path=? WHERE path=?", (new, old))
+
+    def matched_with_sidecar(
+        self, states: tuple[str, ...] = ("matched", "applied")
+    ) -> list[tuple[str, str | None, int | None, float | None, float | None, str | None]]:
+        """(media_path, title, taken_timestamp, lat, lon, description) per matched media."""
+        q = ",".join("?" * len(states))
+        return self.db.execute(
+            f"""SELECT m.path, s.title, s.taken_timestamp, s.latitude, s.longitude, s.description
+                FROM media m JOIN sidecars s ON m.matched_sidecar = s.id
+                WHERE m.state IN ({q}) ORDER BY m.path""",
+            states,
+        ).fetchall()
+
+    def fix_decisions(self) -> list[tuple[str, str, str, str, str]]:
+        """(media, sidecar, rule, state, fix_note) for every media carrying a sidecar."""
+        return self.db.execute(
+            """SELECT m.path, COALESCE(s.path, ''), COALESCE(m.match_rule, ''),
+                      m.state, COALESCE(m.fix_note, '')
+               FROM media m LEFT JOIN sidecars s ON m.matched_sidecar = s.id
+               WHERE m.matched_sidecar IS NOT NULL ORDER BY m.path"""
+        ).fetchall()
+
+    def pending_decisions(self) -> list[tuple[str, str, str, str, str]]:
+        """(path, rule, sidecar, decision, note) for media still in 'hashed'."""
+        return self.db.execute(
+            """SELECT m.path, COALESCE(m.match_rule, ''), COALESCE(s.path, ''),
+                      COALESCE(m.decision, 'UNMATCHED'), COALESCE(m.match_note, '')
+               FROM media m LEFT JOIN sidecars s ON m.matched_sidecar = s.id
+               WHERE m.state IN ('discovered','hashed')"""
+        ).fetchall()
 
     def counts(self) -> dict[str, int]:
         rows = self.db.execute(

@@ -11,6 +11,9 @@ edge case of the cahier des charges:
   6. video without EXIF-able date (.mp4)
   7. media WITHOUT any sidecar (must stay unmatched)
   8. same name, different content (future L2 dedup case)
+  9. perceptual pair: identical pixels, only one sidecar (R5 -> quarantine)
+  10. lying extension: PNG bytes named .jpg (M4 rename, journaled)
+  11. GIF (no EXIF support): M4 XMP sidecar fallback
 
 Usage: python tests/make_fixtures.py <target_dir>
 """
@@ -25,13 +28,25 @@ from pathlib import Path
 
 
 def write_png(path: Path, width: int = 16, height: int = 8, rgb: tuple[int, int, int] = (180, 40, 40)) -> None:
-    """Minimal 8-bit RGB PNG writer using only zlib + struct."""
+    """Minimal 8-bit RGB PNG writer using only zlib + struct.
+
+    Pixels form a deterministic gradient derived from `rgb`, so two images
+    with different rgb have different perceptual hashes (needed by R5/L1),
+    while identical rgb produce byte-identical files (needed by L0/R5 pair).
+    """
 
     def chunk(ctype: bytes, data: bytes) -> bytes:
         c = ctype + data
         return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
 
-    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    r, g, b = rgb
+    rows = []
+    for y in range(height):
+        row = bytearray(b"\x00")
+        for x in range(width):
+            row += bytes(((r + x * 7 + y * 13) % 256, (g + x * 11 + y * 3) % 256, (b + x * 5 + y * 17) % 256))
+        rows.append(bytes(row))
+    raw = b"".join(rows)
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     path.write_bytes(
         b"\x89PNG\r\n\x1a\n"
@@ -113,6 +128,14 @@ def generate(target: Path) -> dict[str, int]:
     # 7. media without sidecar (must stay unmatched, zero write)
     write_png(album / "orphan.jpg", rgb=(120, 120, 20))
 
+    # 7b. perceptual pair (R5): same pixels as IMG_0006.jpg (which HAS a
+    # sidecar) but no sidecar of its own -> quarantine proposal, never a write
+    write_png(album / "IMG_0006.jpg", rgb=(90, 30, 160))
+    (album / "IMG_0006.jpg.supplemental-metadata.json").write_text(
+        json.dumps(sidecar("IMG_0006.jpg", timestamp=1_600_020_000)), encoding="utf-8"
+    )
+    write_png(album / "IMG_0006-copy.jpg", rgb=(90, 30, 160))
+
     # 8. same name, different content (L2 case for dedup)
     other = album / "same-name.jpg"
     write_png(other, rgb=(10, 10, 10))
@@ -121,6 +144,19 @@ def generate(target: Path) -> dict[str, int]:
     write_png(sub / "same-name.jpg", rgb=(200, 200, 200))
     (sub / "same-name.jpg.supplemental-metadata.json").write_text(
         json.dumps(sidecar("same-name.jpg")), encoding="utf-8"
+    )
+
+    # 10. lying extension: PNG bytes named .jpg (M4 renames it, journaled)
+    write_png(album / "photo-fake.jpg", rgb=(200, 60, 120))
+    (album / "photo-fake.jpg.supplemental-metadata.json").write_text(
+        json.dumps(sidecar("photo-fake.jpg", timestamp=1_600_030_000)), encoding="utf-8"
+    )
+
+    # 11. format without EXIF support (GIF): M4 falls back to an .xmp sidecar
+    (album / "anim.gif").write_bytes(b"GIF89a" + b"\x00" * 32)
+    (album / "anim.gif.supplemental-metadata.json").write_text(
+        json.dumps(sidecar("anim.gif", timestamp=1_600_040_000, description="anim")),
+        encoding="utf-8",
     )
 
     # album metadata

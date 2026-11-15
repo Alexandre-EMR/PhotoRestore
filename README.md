@@ -60,12 +60,14 @@ python3 -m photorestore.cli --apply fix
 | Phase | Statut | Contenu |
 |---|---|---|
 | P1 squelette | ✅ | ingest, manifeste SQLite resumable, R1 exact, rapports, CLI, corpus de test |
-| P2 cœur | ⬜ | règles R2–R5, écriture EXIF/XMP (exiftool) |
+| P2 cœur (match) | ✅ | cascade R1–R5 complète : tronqué-46, title, heuristique, perceptuel→quarantaine |
+| P2 cœur (fix) | ✅ | écriture EXIF/XMP via exiftool : fill_missing/json_wins/ask, offset UTC exact, GPS signé, repli XMP, renommage extensions mensongères, vérification post-écriture |
 | P3 dedup | ⬜ | L0 sha256 · L1 pHash · L2 même-nom · L3 vidéos · undo |
 | P4 consolidation | ⬜ | anomalies, Docker Synology (Container Manager) |
 
-Les commandes `fix` et `dedup` existent déjà mais rendent un **code retour 2**
-documenté : elles refusent poliment tant que leur module n'est pas implémenté.
+La commande `dedup` existe déjà mais rend un **code retour 2** documenté :
+elle refuse poliment tant que le module M5 (P3) n'est pas implémenté.
+`fix` est implémenté (M4) et reste en dry-run sans `--apply`.
 
 ## Développement assisté par IA
 

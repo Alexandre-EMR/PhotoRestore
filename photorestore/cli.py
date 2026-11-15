@@ -6,8 +6,8 @@ Global contract:
   * no code path ever deletes a file.
 
 Commands: ingest | match | fix | dedup | report | run | undo
-`run` chains ingest -> match -> report (v0 pipeline). `fix` and `dedup`
-are stubs that explain the roadmap step instead of doing anything unsafe.
+`run` chains ingest -> match -> report. `fix` implements M4 (EXIF/XMP via
+exiftool, dry-run by default); `dedup` is still a P3 stub.
 """
 
 from __future__ import annotations
@@ -19,13 +19,25 @@ from pathlib import Path
 from . import __version__
 from .config import AppConfig, load_config
 from .dedup import DedupNotImplemented, undo
-from .exif_write import ExifWriteNotImplemented
+from .exif_write import fix_all
 from .ingest import discover, extract_archives
 from .manifest import Manifest, sha256_file
 from .match import match_all
-from .report import write_audit_export, write_match_report, write_summary
+from .report import (
+    write_audit_export,
+    write_fix_report,
+    write_match_report,
+    write_quarantine_report,
+    write_summary,
+)
 
 STUB_EXIT_CODE = 2  # explicit, documented: subcommand planned but not implemented
+
+SYNOLOGY_REINDEX_REMINDER = (
+    "Rappel : après écriture EXIF sur le NAS, lancer la ré-indexation — "
+    "Synology Photos → icône Compte → Paramètres → Indexation → Ré-indexer "
+    "(sinon les dates affichées ne bougent pas)."
+)
 
 
 def _confirm_apply() -> bool:
@@ -76,14 +88,15 @@ def cmd_match(args: argparse.Namespace, cfg: AppConfig) -> int:
         (media, rule, sidecar, "MATCH", note)
         for media, rule, sidecar, note in sorted(manifest.matched_decisions())
     ]
-    for m in sorted(
-        manifest.pending_media(states=("discovered", "hashed")), key=lambda r: r.path
-    ):
-        rows.append(
-            (m.path, "", "", "UNMATCHED", "no sure rule matched (R2-R5 planned)")
-        )
+    rows.extend(sorted(manifest.pending_decisions()))
     report_dir = Path(args.report_dir)
     write_match_report(rows, report_dir, cfg.paths)
+    write_quarantine_report(
+        [(media, sidecar, note) for media, _r, sidecar, decision, note in rows
+         if decision == "QUARANTINE"],
+        report_dir,
+        cfg.paths,
+    )
     counts: dict[tuple[str, str], int] = {}
     for _media, rule, _sc, decision, _note in rows:
         counts[(rule, decision)] = counts.get((rule, decision), 0) + 1
@@ -104,13 +117,23 @@ def cmd_match(args: argparse.Namespace, cfg: AppConfig) -> int:
 
 
 def cmd_fix(args: argparse.Namespace, cfg: AppConfig) -> int:
-    try:
-        from .exif_write import apply_exif  # local import keeps stub obvious
-
-        apply_exif(None, cfg.write, args.apply)
-    except ExifWriteNotImplemented as e:
-        print(f"[prévu en P2] {e}", file=sys.stderr)
-        return STUB_EXIT_CODE
+    """M4: plan (dry-run, default) or apply EXIF/XMP writes for matched media."""
+    manifest = Manifest(Path(args.db))
+    results = fix_all(manifest, cfg.write, apply=args.apply)
+    report_dir = Path(args.report_dir)
+    write_fix_report(manifest.fix_decisions(), report_dir, cfg.paths)
+    manifest.close()
+    mode = "APPLY" if args.apply else "DRY-RUN (aucune écriture)"
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r.status] = counts.get(r.status, 0) + 1
+    summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "aucun média matché"
+    print(f"fix: {len(results)} plan(s) — {summary} [{mode}]")
+    print(f"rapport: {(report_dir / cfg.paths.fix_report).resolve()}")
+    if args.apply:
+        print(SYNOLOGY_REINDEX_REMINDER)
+        if counts.get("failed"):
+            return 1  # non-zero exit on step failure (observability contract)
     return 0
 
 
@@ -169,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_match, source=None, workdir=None, zip_mode=False
     )
 
-    sub.add_parser("fix", help="(P2) écriture EXIF/XMP").set_defaults(func=cmd_fix)
+    sub.add_parser("fix", help="(M4) écriture EXIF/XMP via exiftool (dry-run par défaut)").set_defaults(func=cmd_fix)
 
     ded = sub.add_parser("dedup", help="(P3) dédoublonnage par pixels")
     ded.add_argument("source")
