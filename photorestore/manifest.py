@@ -66,8 +66,11 @@ class Manifest:
     # -- registration ----------------------------------------------------
 
     def register_media(self, path: Path, album: str, size: int) -> None:
+        """Upsert: a re-ingest refreshes size/album (file may have changed)
+        without ever resetting the pipeline state of an existing row."""
         self.db.execute(
-            "INSERT OR IGNORE INTO media (path, album, size) VALUES (?, ?, ?)",
+            """INSERT INTO media (path, album, size) VALUES (?, ?, ?)
+               ON CONFLICT(path) DO UPDATE SET album=excluded.album, size=excluded.size""",
             (str(path), album, size),
         )
 
@@ -112,6 +115,20 @@ class Manifest:
                match_note=? WHERE path=?""",
             (sidecar_id, rule, note, path),
         )
+
+    def set_quarantined(self, path: str, rule: str, note: str = "") -> None:
+        """Record a quarantine decision WITHOUT changing the media state:
+        the item stays in 'hashed' so a re-run re-evaluates it identically."""
+        self.db.execute(
+            "UPDATE media SET match_rule=?, match_note=? WHERE path=?", (rule, note, path)
+        )
+
+    def quarantined_media(self) -> list[tuple[str, str, str]]:
+        """Rows for the quarantine report: (path, rule, reason)."""
+        return self.db.execute(
+            """SELECT path, COALESCE(match_rule, ''), COALESCE(match_note, '')
+               FROM media WHERE state='hashed' AND match_rule IS NOT NULL"""
+        ).fetchall()
 
     def counts(self) -> dict[str, int]:
         rows = self.db.execute(

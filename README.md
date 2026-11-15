@@ -48,6 +48,7 @@ python3 -m photorestore.cli match
 
 # 3. Relire les rapports
 #    reports/match_report.csv   — chaque décision, la règle utilisée
+#    reports/quarantine_report.csv — items ambiguïs avec la raison
 #    reports/summary.html      — tableau de bord
 #    reports/audit_export.jsonl — export texte pour audit par agent IA
 

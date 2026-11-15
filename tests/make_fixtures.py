@@ -11,6 +11,7 @@ edge case of the cahier des charges:
   6. video without EXIF-able date (.mp4)
   7. media WITHOUT any sidecar (must stay unmatched)
   8. same name, different content (future L2 dedup case)
+  9. media with BOTH sidecar formats (ambiguous -> quarantine, never a write)
 
 Usage: python tests/make_fixtures.py <target_dir>
 """
@@ -121,6 +122,15 @@ def generate(target: Path) -> dict[str, int]:
     write_png(sub / "same-name.jpg", rgb=(200, 200, 200))
     (sub / "same-name.jpg.supplemental-metadata.json").write_text(
         json.dumps(sidecar("same-name.jpg")), encoding="utf-8"
+    )
+
+    # 9. both sidecar formats for one media: ambiguous -> QUARANTINE
+    write_png(album / "IMG_0009.jpg", rgb=(90, 20, 120))
+    (album / "IMG_0009.jpg.supplemental-metadata.json").write_text(
+        json.dumps(sidecar("IMG_0009.jpg")), encoding="utf-8"
+    )
+    (album / "IMG_0009.jpg.json").write_text(
+        json.dumps(sidecar("IMG_0009.jpg")), encoding="utf-8"
     )
 
     # album metadata
