@@ -24,6 +24,14 @@ from photorestore.manifest import Manifest, sha256_file  # noqa: E402
 from photorestore.match import match_all  # noqa: E402
 from tests.make_fixtures import generate  # noqa: E402
 
+try:  # R5 needs the documented optional deps (Pillow + ImageHash)
+    import imagehash  # noqa: F401
+    import PIL.Image  # noqa: F401
+
+    HAS_PERCEPTUAL = True
+except ImportError:
+    HAS_PERCEPTUAL = False
+
 
 class PipelineTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -64,15 +72,17 @@ class PipelineTest(unittest.TestCase):
         # the ambiguous fixture (both sidecar formats) must be QUARANTINE
         match_rows = list(csv.DictReader((self.reports / "match_report.csv").open(encoding="utf-8")))
         q = [r for r in match_rows if r["decision"] == "QUARANTINE"]
-        self.assertEqual(len(q), 1)
-        self.assertTrue(q[0]["media_path"].endswith("IMG_0009.jpg"))
-        self.assertIn("ambiguous", q[0]["note"])
+        # one quarantine per rule-ambiguity fixture (+1 R5 proposal if deps present)
+        self.assertEqual(len(q), 5 + (1 if HAS_PERCEPTUAL else 0))
+        q9 = [r for r in q if r["media_path"].endswith("IMG_0009.jpg")]
+        self.assertEqual(len(q9), 1)
+        self.assertIn("ambiguous", q9[0]["note"])
         # quarantine_report.csv exists, well-formed, with the reason
         q_report = self.reports / "quarantine_report.csv"
         self.assertTrue(q_report.exists())
         q_rows = list(csv.reader(q_report.open(encoding="utf-8")))
         self.assertEqual(q_rows[0], ["media_path", "sidecar_path", "reason"])
-        self.assertEqual(len(q_rows), 2)  # header + the one quarantined item
+        self.assertEqual(len(q_rows), 1 + len(q))  # header + quarantined items
         self.assertIn("ambiguous", q_rows[1][2])
 
     def test_r1_matches_and_orphan_stays_unmatched(self) -> None:
@@ -93,12 +103,14 @@ class PipelineTest(unittest.TestCase):
         matched = [d for d in decisions if d.decision == "MATCH"]
         unmatched = [d for d in decisions if d.decision == "UNMATCHED"]
         quarantined = [d for d in decisions if d.decision == "QUARANTINE"]
-        # R1 matches: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited,
-        # the video, and the sous-dossier exact pair = 6
-        self.assertEqual(len(matched), 6)
-        # the ambiguous fixture (both sidecar formats) is quarantined
-        self.assertEqual(len(quarantined), 1)
-        orphans = [d for d in unmatched if d.media.endswith("orphan.jpg")]
+        # R1: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited, the video,
+        #     the sous-dossier pair, both R4 originals, ref.jpg, IMG_0010.HEIC
+        # R2: the truncated long name; R3: IMG_0003; R4: IMG_0007;
+        #     live_photo_pair: IMG_0010.MOV  -> 14 matches in total
+        self.assertEqual(len(matched), 14)
+        # one quarantine per ambiguity fixture (+1 R5 proposal if deps present)
+        self.assertEqual(len(quarantined), 5 + (1 if HAS_PERCEPTUAL else 0))
+        orphans = [d for d in unmatched if Path(d.media).name == "orphan.jpg"]
         self.assertEqual(len(orphans), 1, "orphan must stay unmatched")
         manifest.close()
 

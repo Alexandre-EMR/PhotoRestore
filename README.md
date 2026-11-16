@@ -24,6 +24,8 @@ PhotoRestore industrialise cette restauration avec une règle d'or :
 3. **Aucune suppression** — les doublons partent en quarantaine avec manifeste
    d'annulation (`photorestore undo`).
 4. **Zéro dépendance** — bibliothèque standard Python 3.12 uniquement.
+   Exception documentée : l'extra optionnel `perceptual` (Pillow + ImageHash)
+   active la règle R5 (pHash) ; sans lui, R5 est proprement ignorée.
 5. **Local-first** — aucun appel réseau, aucun pixel envoyé ailleurs.
 
 ## Installation
@@ -32,6 +34,9 @@ PhotoRestore industrialise cette restauration avec une règle d'or :
 git clone https://github.com/Alexandre-EMR/photorestore.git
 cd photorestore
 python3 -m photorestore.cli --help
+
+# Optionnel — active la règle R5 (propositions perceptuelles en quarantaine)
+pip install .[perceptual]
 ```
 
 ## Utilisation

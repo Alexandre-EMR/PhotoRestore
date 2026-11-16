@@ -86,7 +86,7 @@ def cmd_match(args: argparse.Namespace, cfg: AppConfig) -> int:
     ]
     rows += [(path, rule, "", "QUARANTINE", note) for path, rule, note in quarantined]
     rows += [
-        (m.path, "", "", "UNMATCHED", "no sure rule matched (R2-R5 planned)")
+        (m.path, "", "", "UNMATCHED", "no rule matched in the cascade (R1-R5)")
         for m in sorted(
             (r for r in manifest.pending_media(states=("discovered", "hashed"))
              if r.path not in q_paths),

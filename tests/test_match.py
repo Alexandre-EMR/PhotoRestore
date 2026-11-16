@@ -14,13 +14,11 @@ from photorestore.manifest import Manifest, sha256_file  # noqa: E402
 from photorestore.ingest import discover  # noqa: E402
 from photorestore.config import MatchConfig  # noqa: E402
 from photorestore.match import (  # noqa: E402
-    RuleNotImplemented,
     build_sidecar_index,
     match_all,
     match_r1_exact,
     match_r2_truncated,
 )
-from tests.make_fixtures import generate  # noqa: E402
 
 
 class MatchTest(unittest.TestCase):
@@ -47,10 +45,27 @@ class MatchTest(unittest.TestCase):
         decision = match_r1_exact(album / "photo.jpg", {sc.name: str(sc)})
         self.assertIsNotNone(decision)
 
-    def test_r2_stub_raises_explicitly(self) -> None:
-        # a stub must never silently "succeed" — it must announce its absence
-        with self.assertRaises(RuleNotImplemented):
-            match_r2_truncated(Path("x.jpg"), {}, trunc=46)
+    def test_r2_truncated_unique_match_and_ambiguity(self) -> None:
+        album = self.tmp / "d"
+        album.mkdir()
+        long = "a-very-long-google-photos-filename-over-forty-six-characters.jpg"
+        (album / long).write_bytes(b"x")
+        sc = album / f"{long[:46]}.json"
+        sc.write_text("{}", encoding="utf-8")
+        decision = match_r2_truncated(
+            album / long, {sc.name: str(sc)}, {long}, trunc=46
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.rule, "R2_truncated")
+        self.assertEqual(decision.decision, "MATCH")
+        # ambiguity: two media share the truncated prefix => QUARANTINE
+        twin = long.replace("characters.jpg", "characters-B.jpg")
+        (album / twin).write_bytes(b"x")
+        decision = match_r2_truncated(
+            album / long, {sc.name: str(sc)}, {long, twin}, trunc=46
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.decision, "QUARANTINE")
 
     def test_r1_ambiguity_quarantines(self) -> None:
         # both sidecar formats for one media => QUARANTINE, never a silent pick

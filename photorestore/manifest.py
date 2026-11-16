@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,13 @@ CREATE TABLE IF NOT EXISTS sidecars (
     description TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_media_state ON media(state);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY,
+    match_id INTEGER NOT NULL REFERENCES media(id),
+    verdict TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    timestamp INTEGER NOT NULL
+);
 """
 
 
@@ -144,6 +152,28 @@ class Manifest:
                FROM media m LEFT JOIN sidecars s ON m.matched_sidecar = s.id
                WHERE m.state IN ('matched','applied','verified')"""
         ).fetchall()
+
+    def record_decision(self, path: str, verdict: str, note: str = "") -> None:
+        """Append a decision to the audit journal (idempotent).
+
+        The cascade re-evaluates quarantined items identically on re-run, so
+        an identical (media, verdict, note) row is NOT inserted twice:
+        running the whole pipeline 2x leaves the journal unchanged.
+        """
+        row = self.db.execute("SELECT id FROM media WHERE path=?", (path,)).fetchone()
+        if row is None:
+            return
+        media_id = row[0]
+        exists = self.db.execute(
+            "SELECT 1 FROM decisions WHERE match_id=? AND verdict=? AND note=?",
+            (media_id, verdict, note),
+        ).fetchone()
+        if exists:
+            return
+        self.db.execute(
+            "INSERT INTO decisions (match_id, verdict, note, timestamp) VALUES (?, ?, ?, ?)",
+            (media_id, verdict, note, int(time.time())),
+        )
 
     def commit(self) -> None:
         self.db.commit()
