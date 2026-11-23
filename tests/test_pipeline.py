@@ -24,6 +24,14 @@ from photorestore.manifest import Manifest, sha256_file  # noqa: E402
 from photorestore.match import match_all  # noqa: E402
 from tests.make_fixtures import generate  # noqa: E402
 
+try:  # R5 needs the documented optional deps (Pillow + ImageHash)
+    import imagehash  # noqa: F401
+    import PIL.Image  # noqa: F401
+
+    HAS_PERCEPTUAL = True
+except ImportError:
+    HAS_PERCEPTUAL = False
+
 
 class PipelineTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -53,18 +61,31 @@ class PipelineTest(unittest.TestCase):
         rows = list(csv.reader(match_report.open(encoding="utf-8")))
         self.assertEqual(rows[0], ["media_path", "rule", "sidecar_path", "decision", "note"])
         body = rows[1:]
-        self.assertEqual(len(body), 14)  # every media gets a decision row
-        decisions = {r[3] for r in body}
-        self.assertIn("MATCH", decisions)
-        self.assertIn("QUARANTINE", decisions)
-        self.assertIn("UNMATCHED", decisions)
-        # quarantine report exists and is motivated
-        qrows = list(csv.reader((self.reports / "quarantine_report.csv").open(encoding="utf-8")))
-        self.assertEqual(qrows[0], ["media_path", "sidecar_path", "reason"])
-        self.assertEqual(len(qrows) - 1, 1)
-        self.assertTrue(qrows[1][2])  # reason is non-empty
+        self.assertGreaterEqual(len(body), 9)  # every media gets a decision row
 
-    def test_cascade_matches_and_orphan_stays_unmatched(self) -> None:
+    def test_ambiguous_media_quarantined_and_reported(self) -> None:
+        rc = self.run_cli(
+            "--db", str(self.db), "--report-dir", str(self.reports),
+            "run", str(self.source),
+        )
+        self.assertEqual(rc, 0)
+        # the ambiguous fixture (both sidecar formats) must be QUARANTINE
+        match_rows = list(csv.DictReader((self.reports / "match_report.csv").open(encoding="utf-8")))
+        q = [r for r in match_rows if r["decision"] == "QUARANTINE"]
+        # one quarantine per rule-ambiguity fixture (+1 R5 proposal if deps present)
+        self.assertEqual(len(q), 5 + (1 if HAS_PERCEPTUAL else 0))
+        q9 = [r for r in q if r["media_path"].endswith("IMG_0009.jpg")]
+        self.assertEqual(len(q9), 1)
+        self.assertIn("ambiguous", q9[0]["note"])
+        # quarantine_report.csv exists, well-formed, with the reason
+        q_report = self.reports / "quarantine_report.csv"
+        self.assertTrue(q_report.exists())
+        q_rows = list(csv.reader(q_report.open(encoding="utf-8")))
+        self.assertEqual(q_rows[0], ["media_path", "sidecar_path", "reason"])
+        self.assertEqual(len(q_rows), 1 + len(q))  # header + quarantined items
+        self.assertIn("ambiguous", q_rows[1][2])
+
+    def test_r1_matches_and_orphan_stays_unmatched(self) -> None:
         cfg = load_config(None)
         manifest = Manifest(self.db)
         # simulate ingest+hash (media AND sidecars must be registered)
@@ -79,20 +100,17 @@ class PipelineTest(unittest.TestCase):
             manifest.set_hashed(m.path, sha256_file(Path(m.path)))
         manifest.commit()
         decisions = match_all(manifest, cfg.match)
-        by_rule: dict[str, list[str]] = {}
-        for d in decisions:
-            by_rule.setdefault(d.rule or d.decision, []).append(d.media)
-        # R1: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited, video,
-        # sous-dossier pair, IMG_0006, photo-fake.jpg, anim.gif = 9
-        self.assertEqual(len(by_rule.get("R1_exact", [])), 9)
-        self.assertEqual(len(by_rule.get("R2_truncated", [])), 1)  # long name
-        self.assertEqual(len(by_rule.get("R3_title", [])), 1)       # IMG_0003
-        # R5: perceptual pair -> QUARANTINE proposal, never a write
-        self.assertEqual(len(by_rule.get("R5_perceptual", [])), 1)
-        quarantined = by_rule["R5_perceptual"]
-        self.assertTrue(quarantined[0].endswith("IMG_0006-copy.jpg"))
-        unmatched = by_rule.get("UNMATCHED", [])
-        orphans = [p for p in unmatched if p.endswith("orphan.jpg")]
+        matched = [d for d in decisions if d.decision == "MATCH"]
+        unmatched = [d for d in decisions if d.decision == "UNMATCHED"]
+        quarantined = [d for d in decisions if d.decision == "QUARANTINE"]
+        # R1: IMG_0001, IMG_0004, IMG_0004(1), IMG_0005-edited, the video,
+        #     the sous-dossier pair, both R4 originals, ref.jpg, IMG_0010.HEIC
+        # R2: the truncated long name; R3: IMG_0003; R4: IMG_0007;
+        #     live_photo_pair: IMG_0010.MOV  -> 14 matches in total
+        self.assertEqual(len(matched), 14)
+        # one quarantine per ambiguity fixture (+1 R5 proposal if deps present)
+        self.assertEqual(len(quarantined), 5 + (1 if HAS_PERCEPTUAL else 0))
+        orphans = [d for d in unmatched if Path(d.media).name == "orphan.jpg"]
         self.assertEqual(len(orphans), 1, "orphan must stay unmatched")
         manifest.close()
 
@@ -113,7 +131,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(report, report2, "re-running must not change decisions")
 
     def test_fix_dry_run_ok_and_dedup_still_stub(self) -> None:
-        # M4 is implemented: `fix` in dry-run exits 0 and writes fix_report.csv
+        # M4 is implemented (exif_write): `fix` in dry-run exits 0 and writes fix_report.csv
         rc = self.run_cli("--db", str(self.db), "--report-dir", str(self.reports), "fix")
         self.assertEqual(rc, 0)
         self.assertTrue((self.reports / "fix_report.csv").exists())

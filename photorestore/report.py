@@ -45,6 +45,8 @@ def write_fix_report(rows: list[tuple], report_dir: Path, cfg: PathsConfig) -> P
 
 
 def write_quarantine_report(rows: list[tuple], report_dir: Path, cfg: PathsConfig) -> Path:
+    """Write quarantine_report.csv — well-formed even when empty (header only)."""
+    report_dir.mkdir(parents=True, exist_ok=True)
     out = report_dir / cfg.quarantine_report
     with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -83,6 +85,7 @@ def write_summary(
         f"<tr><td>{rule or '—'}</td><td>{decision}</td><td>{n}</td></tr>"
         for (rule, decision), n in sorted(counts.items())
     )
+    report_dir.mkdir(parents=True, exist_ok=True)
     out = report_dir / cfg.summary_html
     out.write_text(
         _HTML_TEMPLATE.format(mode=mode, total=total, rows=rows), encoding="utf-8"
@@ -95,6 +98,7 @@ def write_audit_export(
 ) -> Path:
     """Text-only JSONL export for an external audit agent. Paths + stats ONLY:
     privacy invariant — pixels never leave the machine."""
+    report_dir.mkdir(parents=True, exist_ok=True)
     out = report_dir / cfg.audit_export
     with open(out, "w", encoding="utf-8") as f:
         for d in decisions:

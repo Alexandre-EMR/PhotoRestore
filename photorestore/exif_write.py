@@ -34,14 +34,17 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import WriteConfig
 from .manifest import Manifest
 
 POLICIES = ("fill_missing", "json_wins", "ask")
+
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)  # portable base for any epoch year
 
 READ_ARGS = ("-j", "-n", "-DateTimeOriginal", "-GPSLatitude", "-GPSLongitude",
              "-XMP-dc:Description", "-FileModifyDate")
@@ -77,9 +80,26 @@ def resolve_exiftool(cfg: WriteConfig) -> str | None:
     return shutil.which(cfg.exiftool)
 
 
+def _exiftool_argv(binary: str) -> list[str]:
+    """Command prefix for the exiftool binary.
+
+    Real exiftool runs directly. A Python script (``*.py`` or any file with a
+    ``#!`` shebang — the test fake) runs on the current interpreter, because
+    Windows cannot exec scripts on its own.
+    """
+    try:
+        with open(binary, "rb") as f:
+            head = f.read(2)
+    except OSError:
+        head = b""
+    if binary.lower().endswith(".py") or head == b"#!":
+        return [sys.executable, binary]
+    return [binary]
+
+
 def format_exif_datetime(ts: int) -> str:
     """Epoch-UTC -> exiftool date string with explicit offset, no tz guessing."""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt = _EPOCH_UTC + timedelta(seconds=ts)
     return dt.strftime("%Y:%m:%d %H:%M:%S+00:00")
 
 
@@ -102,7 +122,8 @@ def read_exif(path: Path, exiftool: str | None) -> dict[str, str]:
     if exiftool is None:
         return {}
     proc = subprocess.run(
-        [exiftool, *READ_ARGS, str(path)], capture_output=True, text=True, check=False
+        [*_exiftool_argv(exiftool), *READ_ARGS, str(path)],
+        capture_output=True, text=True, check=False,
     )
     if proc.returncode != 0:
         return {}
@@ -155,7 +176,9 @@ def plan_for_media(
     never produces a write action — anomalies are skipped, not guessed.
     """
     if ts is not None:
-        year = datetime.fromtimestamp(ts, tz=timezone.utc).year
+        # pure UTC arithmetic: fromtimestamp() has no portable support for
+        # pre-1970 timestamps on every platform (Windows raises OSError).
+        year = (_EPOCH_UTC + timedelta(seconds=ts)).year
         if not cfg.min_year <= year <= cfg.max_year:
             return [], f"anomaly: taken-time year {year} outside [{cfg.min_year},{cfg.max_year}]"
     actions: list[WriteAction] = []
@@ -185,7 +208,7 @@ def plan_for_media(
 
 def write_exif(path: Path, actions: list[WriteAction], exiftool: str) -> bool:
     """Write tags via exiftool -overwrite_original. False = format rejected EXIF."""
-    args = [exiftool, "-overwrite_original"]
+    args = [*_exiftool_argv(exiftool), "-overwrite_original"]
     args += [f"-{a.tag}={a.value}" for a in actions]
     args.append(str(path))
     proc = subprocess.run(args, capture_output=True, text=True, check=False)

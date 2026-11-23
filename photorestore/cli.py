@@ -13,6 +13,7 @@ exiftool, dry-run by default); `dedup` is still a P3 stub.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -84,18 +85,26 @@ def cmd_match(args: argparse.Namespace, cfg: AppConfig) -> int:
 
     # Reports are rebuilt FROM THE MANIFEST (global state), not from the
     # current run: re-running is a strict no-op on the report files.
+    quarantined = sorted(manifest.quarantined_media())
+    q_paths = {q[0] for q in quarantined}
     rows = [
         (media, rule, sidecar, "MATCH", note)
         for media, rule, sidecar, note in sorted(manifest.matched_decisions())
     ]
-    rows.extend(sorted(manifest.pending_decisions()))
+    rows += [(path, rule, "", "QUARANTINE", note) for path, rule, note in quarantined]
+    rows += [
+        (m.path, "", "", "UNMATCHED", "no rule matched in the cascade (R1-R5)")
+        for m in sorted(
+            (r for r in manifest.pending_media(states=("discovered", "hashed"))
+             if r.path not in q_paths),
+            key=lambda r: r.path,
+        )
+    ]
+    rows.sort(key=lambda r: r[0])
     report_dir = Path(args.report_dir)
     write_match_report(rows, report_dir, cfg.paths)
     write_quarantine_report(
-        [(media, sidecar, note) for media, _r, sidecar, decision, note in rows
-         if decision == "QUARANTINE"],
-        report_dir,
-        cfg.paths,
+        [(path, "", note) for path, _rule, note in quarantined], report_dir, cfg.paths
     )
     counts: dict[tuple[str, str], int] = {}
     for _media, rule, _sc, decision, _note in rows:
@@ -221,7 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         print("abandon : --apply refusé, reste en dry-run.")
         return 1
     cfg = load_config(args.config)
-    return int(args.func(args, cfg) or 0)
+    try:
+        return int(args.func(args, cfg) or 0)
+    except (OSError, sqlite3.Error) as e:
+        print(f"erreur: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

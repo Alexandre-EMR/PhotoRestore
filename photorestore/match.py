@@ -3,37 +3,43 @@
 Rules run from MOST certain to LEAST certain:
   R1 exact     : media.ext <-> media.ext.supplemental-metadata.json (or .json)
   R2 truncated : sidecar names cut at 46 chars, unique candidate in folder
-  R3 title     : JSON "title" holds the original media filename (same folder)
-  R4 heuristic : size +/-2% AND taken-time +/-48h AND same album
-  R5 perceptual: pHash distance <= 3 -> quarantine PROPOSAL, never auto-write
+  R3 title     : JSON "title" holds the original media filename
+  R4 heuristic : copy of an already-matched media — size +/-2% AND
+                 media file time within +/-48h of the sidecar taken-time
+                 AND same album (all three MUST hold simultaneously)
+  R5 perceptual: pHash distance <= 3 between a media without JSON and a
+                 media carrying JSON -> quarantine PROPOSAL for human
+                 review, never an automatic write.
 
 POLICY (invariant): an ambiguous rule result is QUARANTINE, never a write.
-A sidecar is claimed by at most one media (tracked in the manifest across
-runs), so two media can never write the same JSON metadata.
 
-Known v0 limitations, flagged to the owner: R4 uses the file mtime as the
-media-side date proxy until M4/exiftool provides DateTimeOriginal, and its
-size criterion compares against the media named by the sidecar stem when
-that file exists (otherwise the criterion is unverifiable -> not eligible);
-R3 is folder-local (a same-name sidecar in another folder is an L2
-ambiguity, not a title match); R5 computes pHash for PNG only (stdlib
-decoder, see phash.py).
+R4 note on the "size +/-2%" criterion: Takeout JSON files carry no file
+size, so the size is compared between the orphan media and the reference
+media already matched to the JSON (duplicates "(1)", "-edited" and
+recompressed copies keep a near-identical size). Documented deviation,
+flagged for confirmation in the P2a delivery.
+
+R5 note on dependencies: Pillow + ImageHash are the first documented
+exceptions to the zero-dependency policy (optional extra "perceptual").
+Without them, R5 is cleanly skipped and reported, never faked.
+
+Every MATCH / QUARANTINE decision is journaled in the manifest "decisions"
+table (match_id, verdict, note, timestamp) for the future review UI.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import MatchConfig
-from .manifest import Manifest, MediaRow
-from .phash import hamming_hex, phash_file
+from .manifest import Manifest
 
 RULES_ORDER = ("R1_exact", "R2_truncated", "R3_title", "R4_heuristic", "R5_perceptual")
 
-_HOUR_S = 3600
-_SIDECAR_SUFFIXES = (".supplemental-metadata.json", ".json")
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".webm"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tiff"}
+LIVE_PHOTO_MEDIA = {".heic", ".heif"}
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,7 @@ class MatchDecision:
     sidecar: str | None
     decision: str  # "MATCH" | "QUARANTINE" | "UNMATCHED"
     note: str = ""
+    confidence: str = "high"  # high (R1-R3) | medium (R4) | proposal (R5)
 
 
 def _sidecar_candidates(media_path: Path) -> list[str]:
@@ -51,237 +58,368 @@ def _sidecar_candidates(media_path: Path) -> list[str]:
 
 
 def match_r1_exact(media_path: Path, sidecar_index: dict[str, str]) -> MatchDecision | None:
-    """R1: exact sidecar filename in the same folder. None = rule does not apply."""
-    for cand in _sidecar_candidates(media_path):
-        if cand in sidecar_index:
-            return MatchDecision(str(media_path), "R1_exact", sidecar_index[cand], "MATCH")
+    """R1: exact sidecar filename in the same folder. None = rule does not apply.
+
+    POLICY: if BOTH the new (.supplemental-metadata.json) and the old (.json)
+    sidecars exist for the same media, the rule is AMBIGUOUS => QUARANTINE,
+    never a silent pick of one of them.
+    """
+    found = [cand for cand in _sidecar_candidates(media_path) if cand in sidecar_index]
+    if len(found) > 1:
+        return MatchDecision(
+            str(media_path), "R1_exact", None, "QUARANTINE",
+            note="ambiguous: both .supplemental-metadata.json and .json sidecars exist",
+        )
+    if found:
+        return MatchDecision(str(media_path), "R1_exact", sidecar_index[found[0]], "MATCH")
     return None
 
 
 def match_r2_truncated(
     media_path: Path,
     sidecar_index: dict[str, str],
-    claimed: set[str],
-    folder_media: list[str],
-    trunc: int,
+    folder_media_names: set[str],
+    trunc: int = 46,
 ) -> MatchDecision | None:
-    """R2: sidecar truncated at `trunc` chars; match only if the candidate is unique.
+    """R2: sidecar stem truncated at `trunc` chars, unique candidate in folder.
 
-    Ambiguity (another media in the folder starting with the same 46 chars)
-    => QUARANTINE, never a write.
+    A sidecar applies when its stem (name without ".json") is a strict
+    prefix of the media name, at most `trunc` chars long (Google cuts the
+    original filename at 46 chars before appending ".json").
+
+    POLICY: if several media of the folder share the truncated prefix, or
+    several truncated sidecars apply, the rule is AMBIGUOUS => QUARANTINE.
     """
-    suffixed = media_path.name + ".supplemental-metadata"
-    if len(suffixed) <= trunc:
-        return None  # not truncated: R1 already covers this name
-    stem = suffixed[:trunc]
+    name = media_path.name
     candidates = [
-        c for c in (f"{stem}.json", f"{stem}.supplemental-metadata.json")
-        if c in sidecar_index and sidecar_index[c] not in claimed
+        sc
+        for sc in sidecar_index
+        if sc.endswith(".json")
+        and len(sc) - len(".json") <= trunc
+        and len(sc) - len(".json") < len(name)
+        and name.startswith(sc[: -len(".json")])
     ]
     if not candidates:
         return None
-    peers = [p for p in folder_media if p != str(media_path) and Path(p).name.startswith(stem)]
-    if peers:
+    if len(candidates) > 1:
         return MatchDecision(
-            str(media_path), "R2_truncated", sidecar_index[candidates[0]], "QUARANTINE",
-            note=f"truncated sidecar '{candidates[0]}' is ambiguous: {len(peers)} media "
-                 f"in the folder start with the same {trunc} chars",
+            str(media_path), "R2_truncated", None, "QUARANTINE",
+            note=f"ambiguous: {len(candidates)} truncated sidecars apply",
         )
-    return MatchDecision(str(media_path), "R2_truncated", sidecar_index[candidates[0]], "MATCH")
-
-
-def match_r3_title(
-    media_path: Path,
-    folder_sidecars: dict[str, tuple[str | None, int | None]],
-    claimed: set[str],
-) -> MatchDecision | None:
-    """R3: an unclaimed sidecar of the same folder has a "title" containing
-    the media filename. More than one candidate => QUARANTINE."""
-    hits = [
-        path for path, (title, _ts) in folder_sidecars.items()
-        if path not in claimed and title is not None and media_path.name in title
-    ]
-    if not hits:
-        return None
-    if len(hits) > 1:
+    stem = candidates[0][: -len(".json")]
+    starters = [n for n in folder_media_names if n.startswith(stem)]
+    if len(starters) == 1:
         return MatchDecision(
-            str(media_path), "R3_title", hits[0], "QUARANTINE",
-            note=f"{len(hits)} sidecars have a title containing '{media_path.name}'",
+            str(media_path), "R2_truncated", sidecar_index[candidates[0]], "MATCH",
+            note=f"truncated sidecar stem ({len(stem)} chars) unique in folder",
         )
-    return MatchDecision(str(media_path), "R3_title", hits[0], "MATCH")
-
-
-def match_r4_heuristic(
-    manifest: Manifest,
-    media_path: Path,
-    media_row: MediaRow,
-    sidecar_meta: dict[str, tuple[str, str | None, int | None]],
-    claimed: set[str],
-    cfg: MatchConfig,
-) -> MatchDecision | None:
-    """R4: size +/-2% AND taken-time +/-48h AND same album — all must hold.
-
-    Media-side date is the file mtime (proxy until M4 reads DateTimeOriginal).
-    The size criterion compares the pending media with the media named by the
-    sidecar stem (manifest-wide by filename, else on disk in the same folder);
-    an unverifiable criterion makes the sidecar ineligible (ambiguity
-    aversion). >1 candidate => QUARANTINE.
-    """
-    mtime = int(os.stat(media_path).st_mtime)
-    window = cfg.heuristic_time_window_hours * _HOUR_S
-    tol = cfg.heuristic_size_tolerance
-    hits: list[str] = []
-    for path, (sc_album, _title, ts) in sidecar_meta.items():
-        if path in claimed or sc_album != media_row.album or ts is None:
-            continue
-        if abs(ts - mtime) > window:
-            continue
-        stem = Path(path).name
-        for suffix in _SIDECAR_SUFFIXES:
-            if stem.endswith(suffix):
-                stem = stem[: -len(suffix)]
-                break
-        if stem == media_path.name:
-            continue  # that case is R1 territory, not a heuristic
-        peer_size = _peer_size(manifest, media_path.parent, stem)
-        if peer_size is not None and abs(peer_size - media_row.size) <= tol * media_row.size:
-            hits.append(path)
-    if not hits:
-        return None
-    if len(hits) > 1:
-        return MatchDecision(
-            str(media_path), "R4_heuristic", hits[0], "QUARANTINE",
-            note=f"{len(hits)} sidecars within size +/-{tol:.0%} and "
-                 f"+/-{cfg.heuristic_time_window_hours}h in album '{media_row.album}'",
-        )
-    return MatchDecision(str(media_path), "R4_heuristic", hits[0], "MATCH")
-
-
-def _peer_size(manifest: Manifest, folder: Path, stem: str) -> int | None:
-    """Size of the media a sidecar stem refers to: manifest first, disk fallback."""
-    size = manifest.media_size_by_name(stem)
-    if size is not None:
-        return size
-    peer = folder / stem
-    if peer.is_file():
-        return peer.stat().st_size
-    return None
-
-
-def match_r5_perceptual(
-    manifest: Manifest,
-    media_path: Path,
-    album: str,
-    cfg: MatchConfig,
-) -> MatchDecision | None:
-    """R5: pHash distance <= max to an already-matched media of the same album.
-
-    PROPOSAL for human review only: the decision is always QUARANTINE,
-    never MATCH (perceptual similarity is not proof).
-    """
-    phash = _ensure_phash(manifest, str(media_path))
-    if phash is None:
-        return None
-    near = []
-    for other_path, other_album, other_phash in manifest.matched_media_with_phash():
-        if other_path == str(media_path) or other_album != album or not other_phash:
-            continue
-        if hamming_hex(phash, other_phash) <= cfg.perceptual_hamming_max:
-            near.append(other_path)
-    if not near:
-        return None
     return MatchDecision(
-        str(media_path), "R5_perceptual", None, "QUARANTINE",
-        note="perceptual proposal for human review (never auto-written); near: "
-             + ", ".join(sorted(Path(p).name for p in near)),
+        str(media_path), "R2_truncated", None, "QUARANTINE",
+        note=f"ambiguous: {len(starters)} media share the truncated prefix",
     )
 
 
-def _ensure_phash(manifest: Manifest, path: str) -> str | None:
-    """pHash from the manifest cache, computing + caching it on first use."""
-    cached = manifest.get_phash(path)
-    if cached:
-        return cached
-    computed = phash_file(Path(path))
-    if computed is not None:
-        manifest.set_phash(path, computed)
-    return computed
+def match_r3_title(
+    media_path: Path, sidecar_meta: list[tuple[str, str | None, str]]
+) -> MatchDecision | None:
+    """R3: a sidecar of the same folder whose JSON "title" is the media name.
+
+    Folder-scoped on purpose: two albums may hold sidecars with the same
+    title, and a cross-folder lookup would silently pick the wrong one.
+
+    POLICY: several sidecars with the same title => AMBIGUOUS => QUARANTINE.
+    """
+    name = media_path.name
+    candidates = [sc for _name, title, sc in sidecar_meta if title == name]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return MatchDecision(
+            str(media_path), "R3_title", candidates[0], "MATCH",
+            note=f"JSON title is the media name: {name}",
+        )
+    return MatchDecision(
+        str(media_path), "R3_title", None, "QUARANTINE",
+        note=f"ambiguous: {len(candidates)} sidecars carry the title {name!r}",
+    )
 
 
-def build_sidecar_index(manifest: Manifest) -> dict[str, str]:
-    """Map sidecar filename -> full path, for the folder-local lookups."""
+@dataclass(frozen=True)
+class HeuristicRef:
+    """An already-matched media usable as an R4 reference for its sidecar."""
+
+    path: str
+    size: int
+    sidecar: str
+    taken_timestamp: int | None
+
+
+def match_r4_heuristic(
+    media_path: Path,
+    refs: list[HeuristicRef],
+    cfg: MatchConfig,
+    media_size: int,
+    media_mtime: float,
+) -> MatchDecision | None:
+    """R4: orphan copy of a media already carrying a JSON sidecar.
+
+    All three criteria must hold simultaneously:
+      * size: |media_size - ref.size| <= +/-2% of the reference size
+      * time : |media_mtime - sidecar taken_timestamp| <= +/-48h
+      * album: refs are pre-filtered to the media album by the caller
+
+    POLICY: several qualifying references => AMBIGUOUS => QUARANTINE.
+    """
+    tol = cfg.heuristic_size_tolerance
+    window = cfg.heuristic_time_window_hours * 3600
+    candidates = [
+        ref
+        for ref in refs
+        if ref.taken_timestamp is not None
+        and abs(media_size - ref.size) <= tol * max(ref.size, 1)
+        and abs(media_mtime - ref.taken_timestamp) <= window
+    ]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        ref = candidates[0]
+        return MatchDecision(
+            str(media_path), "R4_heuristic", ref.sidecar, "MATCH",
+            note=(
+                f"heuristic copy of {Path(ref.path).name} "
+                f"(size +/-{tol:.0%}, {cfg.heuristic_time_window_hours}h, same album)"
+            ),
+            confidence="medium",
+        )
+    names = ", ".join(sorted(Path(r.path).name for r in candidates))
+    return MatchDecision(
+        str(media_path), "R4_heuristic", None, "QUARANTINE",
+        note=f"ambiguous: {len(candidates)} possible references ({names})",
+        confidence="medium",
+    )
+
+
+def _phash_hex(path: Path) -> str | None:
+    """pHash of an image, or None when Pillow/ImageHash are unavailable.
+
+    First documented exception to the zero-dependency policy
+    (optional extra "perceptual"); a clean skip, never a fake result.
+    """
+    try:
+        import imagehash
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as img:
+            return str(imagehash.phash(img))
+    except OSError:
+        return None
+
+
+def _hamming(a: str, b: str) -> int | None:
+    try:
+        import imagehash
+    except ImportError:
+        return None
+    return imagehash.hex_to_hash(a) - imagehash.hex_to_hash(b)
+
+
+def match_r5_perceptual(
+    media_path: Path,
+    matched_hashes: list[tuple[str, str]],
+    cfg: MatchConfig,
+    phash_cache: dict[str, str],
+) -> MatchDecision | None:
+    """R5: perceptual proposal — QUARANTINE for human review, never a MATCH.
+
+    Compares the orphan image to media already carrying a JSON sidecar.
+    Videos are out of scope (frame sampling is the P3 dedup module).
+    """
+    if media_path.suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+    key = str(media_path)
+    if key not in phash_cache:
+        h = _phash_hex(media_path)
+        if h is None:
+            return None
+        phash_cache[key] = h
+    h1 = phash_cache[key]
+    close: list[tuple[int, str]] = []
+    for ref_path, ref_hash in matched_hashes:
+        d = _hamming(h1, ref_hash)
+        if d is not None and d <= cfg.perceptual_hamming_max:
+            close.append((d, ref_path))
+    if not close:
+        return None
+    close.sort(key=lambda t: (t[0], t[1]))
+    names = ", ".join(Path(p).name for _d, p in close)
+    return MatchDecision(
+        str(media_path), "R5_perceptual", None, "QUARANTINE",
+        note=(
+            f"proposal for human review: perceptual match (distance "
+            f"<={cfg.perceptual_hamming_max}) with {names}"
+        ),
+        confidence="proposal",
+    )
+
+
+def build_sidecar_index(manifest: Manifest) -> dict[Path, dict[str, str]]:
+    """Folder-keyed sidecar index: {folder: {sidecar_name: full_path}}.
+
+    Keying by folder is mandatory: two albums may contain sidecars with the
+    same filename, and a flat name-keyed map would silently drop one.
+    """
     rows = manifest.db.execute("SELECT path FROM sidecars").fetchall()
-    return {Path(r[0]).name: r[0] for r in rows}
+    index: dict[Path, dict[str, str]] = {}
+    for (p,) in rows:
+        full = Path(p)
+        index.setdefault(full.parent, {})[full.name] = p
+    return index
+
+
+def _sidecar_meta_by_folder(manifest: Manifest) -> dict[Path, list[tuple[str, str | None, str]]]:
+    """{folder: [(sidecar_name, title, full_path)]} for R3 (folder-scoped)."""
+    rows = manifest.db.execute("SELECT path, title FROM sidecars").fetchall()
+    meta: dict[Path, list[tuple[str, str | None, str]]] = {}
+    for p, title in rows:
+        full = Path(p)
+        meta.setdefault(full.parent, []).append((full.name, title, p))
+    return meta
+
+
+def _media_names_by_folder(manifest: Manifest) -> dict[Path, set[str]]:
+    rows = manifest.db.execute("SELECT path FROM media").fetchall()
+    folders: dict[Path, set[str]] = {}
+    for (p,) in rows:
+        full = Path(p)
+        folders.setdefault(full.parent, set()).add(full.name)
+    return folders
+
+
+def _load_refs(manifest: Manifest) -> dict[str, list[HeuristicRef]]:
+    """R4 references: media already carrying a sidecar, grouped by album."""
+    rows = manifest.db.execute(
+        """SELECT m.path, m.album, m.size, s.path, s.taken_timestamp
+           FROM media m JOIN sidecars s ON m.matched_sidecar = s.id
+           WHERE m.state IN ('matched','applied','verified')"""
+    ).fetchall()
+    refs: dict[str, list[HeuristicRef]] = {}
+    for m_path, album, size, s_path, ts in rows:
+        refs.setdefault(album, []).append(HeuristicRef(m_path, size, s_path, ts))
+    return refs
 
 
 def match_all(manifest: Manifest, cfg: MatchConfig) -> list[MatchDecision]:
-    """Run the cascade R1->R5 over every hashed-but-unmatched media item.
+    """Run the full cascade R1->R5 over every hashed-but-unmatched media item.
 
-    Deterministic and idempotent: matched items leave the 'hashed' state, so
-    a second run re-evaluates only the still-unmatched items and produces
-    exactly the same decisions (reports are rebuilt from the manifest).
+    Deterministic and idempotent: matched items leave the 'hashed' state,
+    quarantined items are re-evaluated identically and their journal rows
+    are deduplicated, so running twice yields the same decisions.
+
+    Passes: (1) R1-R4 per media, (2) R5 proposals on still-orphan images,
+    (3) iOS Live Photo pairing (.HEIC match extends to its .MOV sibling).
     """
     index = build_sidecar_index(manifest)
-    sidecar_meta = {
-        path: (album, title, ts) for path, album, title, ts in manifest.sidecar_rows()
-    }
-    claimed = manifest.claimed_sidecars()
-    rows = sorted(manifest.pending_media(states=("hashed",)), key=lambda r: r.path)
+    sc_meta = _sidecar_meta_by_folder(manifest)
+    folder_media = _media_names_by_folder(manifest)
+    refs = _load_refs(manifest)
+    decisions: list[MatchDecision] = []
+    newly_matched: list[tuple[Path, str, str]] = []
 
-    # Pass 1: nominal rules R1-R4 (they do not depend on other media).
-    still_open: list[MediaRow] = []
-    by_path: dict[str, MatchDecision] = {}
-    for m in rows:
+    rows = manifest.pending_media(states=("hashed",))
+    for m in sorted(rows, key=lambda r: r.path):
         media_path = Path(m.path)
         folder = media_path.parent
-        local_index = {n: p for n, p in index.items() if Path(p).parent == folder}
-        local_sidecars = {
-            p: (sidecar_meta[p][1], sidecar_meta[p][2])
-            for p in local_index.values() if p in sidecar_meta
-        }
-        folder_media = manifest.media_paths_in_folder(folder)
+        local_index = index.get(folder, {})
 
         decision = match_r1_exact(media_path, local_index)
-        if decision is not None and decision.sidecar in claimed:
-            decision = None
         if decision is None:
             decision = match_r2_truncated(
-                media_path, local_index, claimed, folder_media, cfg.trunc_length
+                media_path, local_index, folder_media.get(folder, set()), cfg.trunc_length
             )
         if decision is None:
-            decision = match_r3_title(media_path, local_sidecars, claimed)
+            decision = match_r3_title(media_path, sc_meta.get(folder, []))
         if decision is None:
-            decision = match_r4_heuristic(manifest, media_path, m, sidecar_meta, claimed, cfg)
-
-        if decision is not None and decision.decision == "MATCH" and decision.sidecar:
-            manifest.set_matched(m.path, decision.sidecar, decision.rule, decision.note)
-            claimed.add(decision.sidecar)
-            by_path[m.path] = decision
-        else:
-            if decision is not None:
-                by_path[m.path] = decision  # quarantine from R2-R4: final
-            still_open.append(m)
-
-    # Pass 2: R5 perceptual needs the matched pool, so it runs after pass 1.
-    # The pHash cache is warmed for every matched media (resumable: stored
-    # in the manifest, so a re-run never recomputes them).
-    for path, _album in manifest.matched_media():
-        _ensure_phash(manifest, path)
-    for m in still_open:
-        if m.path in by_path:  # already quarantined by a nominal rule
-            manifest.set_decision(
-                m.path, by_path[m.path].decision, by_path[m.path].rule, by_path[m.path].note
+            decision = match_r4_heuristic(
+                media_path,
+                refs.get(m.album, []),
+                cfg,
+                m.size,
+                media_path.stat().st_mtime,
+            )
+        if decision is None:
+            decisions.append(
+                MatchDecision(str(media_path), "", None, "UNMATCHED",
+                              note="no rule matched in the cascade (R1-R5)")
             )
             continue
-        media_path = Path(m.path)
-        decision = match_r5_perceptual(manifest, media_path, m.album, cfg)
+        decisions.append(decision)
+        if decision.decision == "MATCH":
+            manifest.set_matched(m.path, decision.sidecar, decision.rule, decision.note)
+            sc = manifest.db.execute(
+                "SELECT id, taken_timestamp FROM sidecars WHERE path=?", (decision.sidecar,)
+            ).fetchone()
+            if sc:
+                refs.setdefault(m.album, []).append(
+                    HeuristicRef(m.path, m.size, decision.sidecar, sc[1])
+                )
+            newly_matched.append((media_path, m.path, decision.sidecar))
+        else:
+            manifest.set_quarantined(m.path, decision.rule, decision.note)
+        manifest.record_decision(m.path, decision.decision, f"[{decision.rule}] {decision.note}")
+
+    # Pass 2: R5 perceptual proposals on images still without any decision.
+    phash_cache: dict[str, str] = {}
+    orphans = manifest.db.execute(
+        "SELECT path FROM media WHERE state='hashed' AND match_rule IS NULL ORDER BY path"
+    ).fetchall()
+    matched_hashes: list[tuple[str, str]] = []
+    if orphans:
+        for (p,) in manifest.db.execute(
+            """SELECT m.path FROM media m
+               WHERE m.state IN ('matched','applied','verified')"""
+        ).fetchall():
+            if Path(p).suffix.lower() in VIDEO_SUFFIXES:
+                continue
+            h = phash_cache.get(p) or _phash_hex(Path(p))
+            if h is not None:
+                phash_cache[p] = h
+                matched_hashes.append((p, h))
+    for (p,) in orphans:
+        media_path = Path(p)
+        decision = match_r5_perceptual(media_path, matched_hashes, cfg, phash_cache)
         if decision is None:
-            decision = MatchDecision(
-                str(media_path), "", None, "UNMATCHED",
-                note="no sure rule matched (R1-R5 evaluated)",
-            )
-        manifest.set_decision(m.path, decision.decision, decision.rule, decision.note)
-        by_path[m.path] = decision
+            continue
+        decisions.append(decision)
+        manifest.set_quarantined(p, decision.rule, decision.note)
+        manifest.record_decision(p, decision.decision, f"[{decision.rule}] {decision.note}")
+
+    # Pass 3: iOS Live Photos — the .MOV sibling shares the .HEIC sidecar.
+    for media_path, m_path, sidecar in newly_matched:
+        if media_path.suffix.lower() not in LIVE_PHOTO_MEDIA:
+            continue
+        stem = media_path.stem
+        folder = media_path.parent
+        mov_name = next(
+            (n for n in sorted(folder_media.get(folder, set()))
+             if n.lower() == f"{stem.lower()}.mov"),
+            None,
+        )
+        if mov_name is None:
+            continue
+        mov_path = folder / mov_name
+        still = manifest.db.execute(
+            "SELECT 1 FROM media WHERE path=? AND state='hashed' AND match_rule IS NULL",
+            (str(mov_path),),
+        ).fetchone()
+        if not still:
+            continue
+        note = f"Live Photo pair: .MOV sibling of {media_path.name}"
+        decision = MatchDecision(str(mov_path), "live_photo_pair", sidecar, "MATCH", note)
+        decisions.append(decision)
+        manifest.set_matched(str(mov_path), sidecar, "live_photo_pair", note)
+        manifest.record_decision(str(mov_path), "MATCH", f"[live_photo_pair] {note}")
 
     manifest.commit()
-    return [by_path[m.path] for m in rows]
+    return decisions
