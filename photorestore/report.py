@@ -18,6 +18,7 @@ from .config import PathsConfig
 
 MATCH_HEADER = ("media_path", "rule", "sidecar_path", "decision", "note")
 QUARANTINE_HEADER = ("media_path", "sidecar_path", "reason")
+FIX_HEADER = ("media_path", "sidecar_path", "rule", "state", "fix_note")
 
 
 def write_match_report(rows: list[tuple], report_dir: Path, cfg: PathsConfig) -> Path:
@@ -29,6 +30,17 @@ def write_match_report(rows: list[tuple], report_dir: Path, cfg: PathsConfig) ->
         w.writerow(MATCH_HEADER)
         for media, rule, sidecar, decision, note in rows:
             w.writerow((media, rule, sidecar, decision, note))
+    return out
+
+
+def write_fix_report(rows: list[tuple], report_dir: Path, cfg: PathsConfig) -> Path:
+    """Write fix_report.csv — one row per matched media (M4 outcome, dry-run or applied)."""
+    report_dir.mkdir(parents=True, exist_ok=True)
+    out = report_dir / cfg.fix_report
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(FIX_HEADER)
+        w.writerows(rows)
     return out
 
 

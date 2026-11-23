@@ -130,13 +130,16 @@ class PipelineTest(unittest.TestCase):
         report2 = (self.reports / "match_report.csv").read_text(encoding="utf-8")
         self.assertEqual(report, report2, "re-running must not change decisions")
 
-    def test_fix_and_dedup_are_safe_stubs(self) -> None:
+    def test_fix_dry_run_ok_and_dedup_still_stub(self) -> None:
+        # M4 is implemented (exif_write): `fix` in dry-run exits 0 and writes fix_report.csv
         rc = self.run_cli("--db", str(self.db), "--report-dir", str(self.reports), "fix")
-        self.assertEqual(rc, 2)  # documented STUB_EXIT_CODE
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.reports / "fix_report.csv").exists())
+        # M5 dedup is still a documented stub (exit code 2)
         rc = self.run_cli(
             "--db", str(self.db), "--report-dir", str(self.reports), "dedup", str(self.source)
         )
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, 2)  # documented STUB_EXIT_CODE
 
 
 if __name__ == "__main__":
